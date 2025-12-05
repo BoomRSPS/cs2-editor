@@ -21,7 +21,7 @@ data class ScriptConfiguration(val opcodeDatabase: String = "/cs2/opcode/databas
     fun generateScriptsDatabase(cacheLibrary: CacheLibrary, loop: Int = 6): FunctionDatabase {
         val opcodesDatabase = FunctionDatabase(javaClass.getResourceAsStream(opcodeDatabase), false, scrambled)
         val scriptsDatabase = FunctionDatabase()
-        val ids = cacheLibrary.index(SCRIPTS_INDEX).archiveIds()
+        val ids = cacheLibrary.index(SCRIPTS_INDEX)!!.archiveIds()
         for (l in 0 until loop) {
             for (id in ids) {
                 val data = cacheLibrary.data(SCRIPTS_INDEX, id)

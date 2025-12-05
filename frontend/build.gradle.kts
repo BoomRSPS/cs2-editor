@@ -21,7 +21,7 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     implementation("com.displee:disio:2.2")
-    implementation("com.displee:rs-cache-library:6.8.1")
+    implementation("com.displee:rs-cache-library:8.0.1")
     implementation("org.fxmisc.richtext:richtextfx:0.10.9")
     implementation("com.google.code.gson:gson:2.9.0")
 }

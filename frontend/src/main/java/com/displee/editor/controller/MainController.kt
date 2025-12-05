@@ -133,7 +133,7 @@ class MainController : Initializable {
                     if (!this::cacheLibrary.isInitialized) {
                         return@addEventHandler
                     }
-                    newScript(notifyChooseScriptId(cacheLibrary.index(SCRIPTS_INDEX).nextId()))
+                    newScript(notifyChooseScriptId(cacheLibrary.index(SCRIPTS_INDEX)!!.nextArchiveId()))
                 }
 
                 e.isControlDown && e.code == KeyCode.I -> {
@@ -167,7 +167,7 @@ class MainController : Initializable {
             }
         }
         newMenuItem.setOnAction {
-            newScript(notifyChooseScriptId(cacheLibrary.index(SCRIPTS_INDEX).nextId()))
+            newScript(notifyChooseScriptId(cacheLibrary.index(SCRIPTS_INDEX)!!.nextArchiveId()))
         }
         importScriptMenuItem.setOnAction {
             importScript()
@@ -403,7 +403,7 @@ class MainController : Initializable {
 
     private fun loadScripts() {
         status("Populating scripts...")
-        val ids = cacheLibrary.index(SCRIPTS_INDEX).archiveIds()
+        val ids = cacheLibrary.index(SCRIPTS_INDEX)!!.archiveIds()
         scripts = ids.copyOf()
         search(searchField.text)
     }
@@ -676,7 +676,7 @@ class MainController : Initializable {
         val compiled = compiler.compile(null) ?: throw Error("Failed to compile.")
         cacheLibrary.put(SCRIPTS_INDEX, newId, compiled)
 
-        if (!cacheLibrary.index(SCRIPTS_INDEX).update()) {
+        if (!cacheLibrary.index(SCRIPTS_INDEX)!!.update()) {
             Notification.error("Failed to create new script with id $newId.")
         } else {
             Notification.info("A new script has been created with id $newId.")
@@ -704,14 +704,14 @@ class MainController : Initializable {
                     val compiler = CS2Compiler(function)
                     val compiled = compiler.compile(null) ?: throw IllegalStateException("Failed to compile.")
                     cacheLibrary.put(SCRIPTS_INDEX, scriptId, compiled)
-                    isUpdateSuccessful = cacheLibrary.index(SCRIPTS_INDEX).update()
+                    isUpdateSuccessful = cacheLibrary.index(SCRIPTS_INDEX)!!.update()
                     Notification.info("Successfully imported script with ID $scriptId.")
                 }
 
                 fileName.endsWith(".dat") -> {
                     val compiledData = file.readBytes()
                     cacheLibrary.put(SCRIPTS_INDEX, scriptId, compiledData)
-                    isUpdateSuccessful = cacheLibrary.index(SCRIPTS_INDEX).update()
+                    isUpdateSuccessful = cacheLibrary.index(SCRIPTS_INDEX)!!.update()
                     Notification.info("Successfully imported compiled script with ID $scriptId.")
                 }
 
@@ -752,7 +752,7 @@ class MainController : Initializable {
             val compiled = compiler.compile(null) ?: throw Error("Failed to compile.")
             cacheLibrary.put(SCRIPTS_INDEX, script.scriptID, compiled)
             activeCodeArea.autoCompletePopup?.init(function)
-            if (cacheLibrary.index(SCRIPTS_INDEX).update()) {
+            if (cacheLibrary.index(SCRIPTS_INDEX)!!.update()) {
                 printConsoleMessage("Packed script ${script.scriptID} successfully.")
             } else {
                 printConsoleMessage("Failed to pack script ${script.scriptID}.")

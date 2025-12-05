@@ -5,8 +5,8 @@ plugins {
 
 dependencies {
     implementation("com.displee:disio:2.2")
-    implementation("com.displee:rs-cache-library:6.8.1")
-    implementation("org.apache.commons:commons-lang3:3.12.0")
+    implementation("com.displee:rs-cache-library:8.0.1")
+    implementation("org.apache.commons:commons-lang3:3.18.0")
 }
 
 publishing {
