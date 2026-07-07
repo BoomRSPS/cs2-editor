@@ -1,6 +1,8 @@
 package dawn.cs2;
 
 import com.displee.cache.CacheLibrary;
+import com.displee.io.impl.OutputBuffer;
+import dawn.cs2.instructions.*;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
@@ -121,7 +123,195 @@ public class CachePorter {
         return result;
     }
 
+    /**
+     * Copy whole interface groups (index 3 archives, each holding one file per component) from
+     * {@code src} into {@code dst}, replacing any existing group in the destination, and persist.
+     *
+     * Interface definitions are opcode-based and a newer client's decoder is a superset of an older
+     * one's, so an older group decodes fine in a newer cache — this is a plain archive copy, no footer
+     * transcode like scripts need. NOTE: for groups that already exist in {@code dst}, this OVERWRITES
+     * the destination's version (e.g. reverts a stock 239 interface to the source cache's version).
+     */
+    public static Result portInterfaces(CacheLibrary src, CacheLibrary dst, int[] groups) {
+        Result result = new Result();
+        for (int group : groups) {
+            try {
+                var srcArchive = src.index(INTERFACE_INDEX).archive(group);
+                if (srcArchive == null) {
+                    result.failed.put(group, "not present in source cache index " + INTERFACE_INDEX);
+                    continue;
+                }
+                var files = srcArchive.files();
+                // drop any existing destination group first so stale components don't linger
+                dst.remove(INTERFACE_INDEX, group);
+                int copied = 0;
+                for (var f : files) {
+                    byte[] fileData = f.getData();
+                    if (fileData == null) continue;
+                    dst.put(INTERFACE_INDEX, group, f.getId(), fileData, (int[]) null);
+                    copied++;
+                }
+                if (copied == 0) {
+                    result.failed.put(group, "source group had no component data");
+                    continue;
+                }
+                result.ported.add(group);
+            } catch (Exception e) {
+                result.failed.put(group, String.valueOf(e.getMessage()));
+            }
+        }
+        if (!result.ported.isEmpty()) {
+            var index = dst.index(INTERFACE_INDEX);
+            if (index == null || !index.update()) {
+                throw new IllegalStateException("Failed to persist destination cache index " + INTERFACE_INDEX);
+            }
+        }
+        return result;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Cross-revision script adaptation: some clientscript opcodes changed their argument count between
+    // the older cache's revision and 239. A byte-perfect script copy therefore feeds the 239 client the
+    // wrong number of stack values and crashes (stack underflow). We fix this by rewriting the
+    // instruction stream: for each affected opcode we insert N `push_int 0` immediately before it so the
+    // stack matches what the 239 client pops. The extra arg(s) are the new trailing parameter(s) (the
+    // 239 native scripts pass 0 there), verified against the 239 client's ScriptRunner.
+    //
+    // Key: editor master opcode. Value: number of `push_int 0` to insert before each occurrence.
+    //   150 = createChild (cache opcode 100): 3 args in <=~236, 4 args in 239 (added a trailing flag).
+    // ---------------------------------------------------------------------------------------------
+    public static final Map<Integer, Integer> REV239_INT_ARG_INSERTS = Map.of(150, 1);
+
+    /**
+     * Read a script from {@code src} (in {@code srcLongs} footer format), rewrite its instruction stream
+     * to match 239 opcode conventions (see {@link #REV239_INT_ARG_INSERTS}), and re-serialise it in the
+     * {@code dstLongs} footer format. Returns the ready-to-write bytes, or null if the script is absent.
+     */
+    public static byte[] adaptScript(byte[] data, int id, Map<Integer, Integer> unscramble, Map<Integer, Integer> scramble,
+                                     boolean disableSwitches, boolean srcLongs, boolean dstLongs) throws Exception {
+        CS2 script = CS2Reader.readCS2ScriptNewFormat(data, id, unscramble, disableSwitches, !srcLongs);
+        List<AbstractInstruction> out = new ArrayList<>();
+        int inserted = 0;
+        for (AbstractInstruction ins : script.getInstructions()) {
+            if (ins == null) continue;
+            Integer n = REV239_INT_ARG_INSERTS.get(ins.getOpcode());
+            if (n != null && (ins instanceof BooleanInstruction || ins instanceof IntInstruction)) {
+                for (int k = 0; k < n; k++) out.add(new IntInstruction(Opcodes.PUSH_INT, 0));
+                inserted += n;
+            }
+            out.add(ins);
+        }
+        return reserialize(out, script, scramble, dstLongs, !disableSwitches);
+    }
+
+    /** Serialise an instruction list (labels for jump/switch targets) + a script's local/arg counts to bytes. */
+    private static byte[] reserialize(List<AbstractInstruction> instrs, CS2 script, Map<Integer, Integer> scramble,
+                                      boolean supportLongs, boolean supportSwitch) {
+        // assign addresses: labels take the address of the following real instruction, reals are sequential
+        int addr = 0;
+        List<AbstractInstruction> code = new ArrayList<>(instrs.size());
+        for (AbstractInstruction instr : instrs) {
+            if (instr instanceof Label) {
+                instr.setAddress(addr);
+                ((Label) instr).setLabelID(addr);
+            } else {
+                instr.setAddress(addr++);
+                code.add(instr);
+            }
+        }
+        OutputBuffer output = new OutputBuffer(Math.max(64, code.size() * 4 + 64));
+        output.writeByte(0); // empty name terminator
+        int switchCount = 0;
+        for (AbstractInstruction instr : code) {
+            int opcode = instr.getOpcode();
+            Integer n = scramble.get(opcode);
+            if (n == null) n = opcode; // OSRS identity fallback
+            output.writeShort(n);
+            if (instr instanceof SwitchInstruction) {
+                output.writeInt(switchCount++);
+            } else if (instr instanceof LongInstruction) {
+                output.writeLong(((LongInstruction) instr).getConstant());
+            } else if (instr instanceof StringInstruction) {
+                output.writeString(((StringInstruction) instr).getConstant());
+            } else if (instr instanceof JumpInstruction) {
+                output.writeInt(((JumpInstruction) instr).getTarget().getAddress() - instr.getAddress() - 1);
+            } else if (instr instanceof IntInstruction) {
+                // The reader models RETURN/POP_INT/POP_STRING/POP_LONG as IntInstructions but their operand
+                // is a single byte on disk (not a 4-byte int); match that so the stream stays aligned.
+                int op = instr.getOpcode();
+                if (op == Opcodes.RETURN || op == Opcodes.POP_INT || op == Opcodes.POP_STRING || op == Opcodes.POP_LONG) {
+                    output.writeByte(((IntInstruction) instr).getConstant());
+                } else {
+                    output.writeInt(((IntInstruction) instr).getConstant());
+                }
+            } else if (instr instanceof BooleanInstruction) {
+                output.writeByte(((BooleanInstruction) instr).getConstant() ? 1 : 0);
+            } else {
+                throw new IllegalStateException("Cannot serialise instruction " + instr.getClass());
+            }
+        }
+        output.writeInt(code.size());
+        output.writeShort(script.getIntLocalsSize());
+        output.writeShort(script.getStringLocalsSize());
+        if (supportLongs) output.writeShort(script.getLongLocalsSize());
+        output.writeShort(script.getIntArgumentsCount());
+        output.writeShort(script.getStringArgumentsCount());
+        if (supportLongs) output.writeShort(script.getLongArgumentsCount());
+        if (supportSwitch) {
+            long markSwitch = output.getOffset();
+            output.writeByte(switchCount);
+            for (AbstractInstruction instr : code) {
+                if (instr instanceof SwitchInstruction) {
+                    SwitchInstruction sw = (SwitchInstruction) instr;
+                    output.writeShort(sw.cases.size());
+                    for (int c = 0; c < sw.cases.size(); c++) {
+                        output.writeInt(sw.cases.get(c));
+                        output.writeInt(sw.targets.get(c).getAddress() - instr.getAddress() - 1);
+                    }
+                }
+            }
+            output.writeShort((short) (output.getOffset() - markSwitch));
+        }
+        return output.array();
+    }
+
+    /**
+     * Port scripts from {@code src} into {@code dst}, adapting each to 239 opcode conventions. Footer
+     * formats are auto-detected. Use this (instead of {@link #port}) when moving scripts UP across a
+     * revision where opcode signatures changed.
+     */
+    public static Result portScriptsAdapting(CacheLibrary src, CacheLibrary dst, int[] ids) {
+        Map<Integer, Integer> unscramble = scriptConfiguration().getUnscrambled();
+        Map<Integer, Integer> scramble = scriptConfiguration().getScrambled();
+        boolean disableSwitches = scriptConfiguration().getDisableSwitches();
+        boolean srcLongs = !ScriptConfiguration.detectDisableLongs(src, unscramble, disableSwitches);
+        boolean dstLongs = !ScriptConfiguration.detectDisableLongs(dst, unscramble, disableSwitches);
+        Result result = new Result();
+        for (int id : ids) {
+            try {
+                byte[] data = src.data(SCRIPTS_INDEX, id);
+                if (data == null) {
+                    result.failed.put(id, "not present in source cache");
+                    continue;
+                }
+                byte[] adapted = adaptScript(data, id, unscramble, scramble, disableSwitches, srcLongs, dstLongs);
+                dst.put(SCRIPTS_INDEX, id, adapted);
+                result.ported.add(id);
+            } catch (Exception e) {
+                result.failed.put(id, String.valueOf(e.getMessage()));
+            }
+        }
+        if (!result.ported.isEmpty()) {
+            var index = dst.index(SCRIPTS_INDEX);
+            if (index == null || !index.update()) {
+                throw new IllegalStateException("Failed to persist destination cache index " + SCRIPTS_INDEX);
+            }
+        }
+        return result;
+    }
+
     private static final int SCRIPTS_INDEX = CS2ConstantsKt.SCRIPTS_INDEX;
+    private static final int INTERFACE_INDEX = 3;
 
     private static ScriptConfiguration scriptConfiguration() {
         return CS2ConstantsKt.getScriptConfiguration();

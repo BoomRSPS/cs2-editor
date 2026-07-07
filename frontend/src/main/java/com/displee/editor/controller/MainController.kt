@@ -69,6 +69,9 @@ class MainController : Initializable {
     private lateinit var copyToCacheMenuItem: MenuItem
 
     @FXML
+    private lateinit var copyInterfacesToCacheMenuItem: MenuItem
+
+    @FXML
     private lateinit var showAssemblyMenuItem: CheckMenuItem
 
     @FXML
@@ -121,6 +124,8 @@ class MainController : Initializable {
     private lateinit var scriptsDatabase: FunctionDatabase
 
     private var currentScript: CS2? = null
+
+    private val INTERFACE_INDEX = 3
 
     private val recentPaths = mutableListOf<File>()
     private val maxRecentPaths = 10 // Set how many recent paths that is allowed to be cached.
@@ -177,6 +182,9 @@ class MainController : Initializable {
         }
         copyToCacheMenuItem.setOnAction {
             copyScriptsToCache()
+        }
+        copyInterfacesToCacheMenuItem.setOnAction {
+            copyInterfacesToCache()
         }
         aboutMenuItem.setOnAction {
             AboutWindow()
@@ -428,7 +436,7 @@ class MainController : Initializable {
         input.headerText = "Which scripts to copy from the current cache?"
         input.contentText = "IDs / ranges / all (e.g. \"71\", \"1,4,71\", \"1000-1099\", \"all\"):"
         val idsText = input.showAndWait().orElse(null)?.trim() ?: return
-        val ids = parseScriptIds(idsText)
+        val ids = parseIds(idsText, SCRIPTS_INDEX)
         if (ids == null) {
             Notification.error("Couldn't parse script IDs: \"$idsText\"")
             return
@@ -440,6 +448,20 @@ class MainController : Initializable {
         val chooser = DirectoryChooser()
         chooser.title = "Choose the destination cache directory"
         val dir = chooser.showDialog(mainWindow()) ?: return
+        val adaptAlert = Alert(
+            Alert.AlertType.CONFIRMATION,
+            "Adapt scripts to revision 239 conventions?\n\n" +
+                "YES — when copying from an OLDER cache into a 239 cache. Rewrites the bytecode for " +
+                "clientscript opcodes that changed between revisions (e.g. createChild gained an argument " +
+                "in 239) so the scripts don't crash the client.\n\n" +
+                "NO — plain byte-for-byte copy (use for same/near revision).",
+            ButtonType.YES, ButtonType.NO, ButtonType.CANCEL
+        )
+        adaptAlert.title = "Adapt scripts?"
+        adaptAlert.headerText = null
+        val choice = adaptAlert.showAndWait().orElse(ButtonType.CANCEL)
+        if (choice == ButtonType.CANCEL) return
+        val adapt = choice == ButtonType.YES
         scriptList.isDisable = true
         status("Copying ${ids.size} script(s) to ${dir.name}...")
         GlobalScope.launch {
@@ -454,7 +476,8 @@ class MainController : Initializable {
                     }
                     return@launch
                 }
-                val result = CachePorter.port(cacheLibrary, dst, ids)
+                val result = if (adapt) CachePorter.portScriptsAdapting(cacheLibrary, dst, ids)
+                             else CachePorter.port(cacheLibrary, dst, ids)
                 try { dst.close() } catch (ignored: Exception) {}
                 Platform.runLater {
                     scriptList.isDisable = false
@@ -480,10 +503,79 @@ class MainController : Initializable {
         }
     }
 
-    /** Parse "all", comma-separated ids and dash ranges (e.g. "1,4,1000-1099") into script ids; null if invalid. */
-    private fun parseScriptIds(text: String): IntArray? {
+    /**
+     * Copy whole interface groups (index 3) from the current cache into another cache the user selects.
+     * Interface definitions are a plain archive copy (no footer transcode); for groups that already exist
+     * in the destination this OVERWRITES them with the source cache's version. See [CachePorter.portInterfaces].
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun copyInterfacesToCache() {
+        if (!this::cacheLibrary.isInitialized) {
+            Notification.error("Open a source cache first.")
+            return
+        }
+        val input = TextInputDialog()
+        input.title = "Copy interfaces to another cache"
+        input.headerText = "Which interface groups (index 3) to copy from the current cache?"
+        input.contentText = "IDs / ranges / all (e.g. \"1034\", \"162,704\", \"1000-1099\", \"all\"):"
+        val idsText = input.showAndWait().orElse(null)?.trim() ?: return
+        val ids = parseIds(idsText, INTERFACE_INDEX)
+        if (ids == null) {
+            Notification.error("Couldn't parse interface group IDs: \"$idsText\"")
+            return
+        }
+        if (ids.isEmpty()) {
+            Notification.error("No interface groups to copy.")
+            return
+        }
+        val chooser = DirectoryChooser()
+        chooser.title = "Choose the destination cache directory"
+        val dir = chooser.showDialog(mainWindow()) ?: return
+        scriptList.isDisable = true
+        status("Copying ${ids.size} interface group(s) to ${dir.name}...")
+        GlobalScope.launch {
+            try {
+                val dst = CacheLibrary(dir.absolutePath, false, null)
+                if (!dst.exists(INTERFACE_INDEX)) {
+                    try { dst.close() } catch (ignored: Exception) {}
+                    Platform.runLater {
+                        Notification.error("Destination cache has no interface index ($INTERFACE_INDEX).")
+                        scriptList.isDisable = false
+                        status("ready")
+                    }
+                    return@launch
+                }
+                val result = CachePorter.portInterfaces(cacheLibrary, dst, ids)
+                try { dst.close() } catch (ignored: Exception) {}
+                Platform.runLater {
+                    scriptList.isDisable = false
+                    status("ready")
+                    if (result.ported.isEmpty()) {
+                        Notification.error("Copied 0 interface groups (${result.failed.size} failed).")
+                    } else {
+                        val extra = if (result.failed.isEmpty()) "" else " (${result.failed.size} failed)"
+                        Notification.info("Copied ${result.ported.size} interface group(s) to ${dir.name}$extra.")
+                    }
+                    if (result.failed.isNotEmpty()) {
+                        printConsoleMessage("Interface copy to ${dir.absolutePath}: ${result.failed.size} failed -> ${result.failed}")
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Platform.runLater {
+                    scriptList.isDisable = false
+                    status("ready")
+                    Notification.error("Copy failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /** Parse "all", comma-separated ids and dash ranges (e.g. "1,4,1000-1099") into ids; null if invalid.
+     *  For "all", enumerates the archive ids of [allIndex]. */
+    private fun parseIds(text: String, allIndex: Int): IntArray? {
         if (text.equals("all", ignoreCase = true)) {
-            return cacheLibrary.index(SCRIPTS_INDEX)?.archiveIds()
+            return cacheLibrary.index(allIndex)?.archiveIds()
         }
         val ids = sortedSetOf<Int>()
         try {
@@ -607,6 +699,7 @@ class MainController : Initializable {
             buildMenuItem.isDisable = false
             exportSignatures.isDisable = false
             copyToCacheMenuItem.isDisable = false
+            copyInterfacesToCacheMenuItem.isDisable = false
         }
     }
 
