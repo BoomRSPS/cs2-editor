@@ -26,7 +26,7 @@ public class CS2Compiler {
         this.scramble = CS2ConstantsKt.getScriptConfiguration().getScrambled();
         this.supportEq01 = scramble.containsKey(Opcodes.EQ0);
         this.supportSwitch = !CS2ConstantsKt.getScriptConfiguration().getDisableSwitches() && scramble.containsKey(Opcodes.SWITCH);
-        this.supportLongs = !CS2ConstantsKt.getScriptConfiguration().getDisableLongs() && scramble.containsKey(Opcodes.PUSH_LONG);
+        this.supportLongs = !CS2ConstantsKt.getScriptConfiguration().getDisableLongs();
     }
     
     public CS2Compiler(FunctionNode function, Map<Integer, Integer> scramble, boolean disableSwitches, boolean disableLongs) {
@@ -34,7 +34,7 @@ public class CS2Compiler {
         this.scramble = scramble;
         this.supportEq01 = scramble.containsKey(Opcodes.EQ0);
         this.supportSwitch = !disableSwitches && scramble.containsKey(Opcodes.SWITCH);
-        this.supportLongs = !disableLongs && scramble.containsKey(Opcodes.PUSH_LONG);
+        this.supportLongs = !disableLongs;
     }
 
     public byte[] compile(PrintWriter assembly) throws IOException {
@@ -79,7 +79,10 @@ public class CS2Compiler {
             int opcode = instr.getOpcode();
             Integer n = scramble.get(opcode);
             if (n == null) {
-                throw new DecompilerException("I don't know how to scramble this op " + opcode);
+                // OSRS uses identity opcodes (no scrambling); a command absent from the scramble table
+                // is a newer opcode we have no explicit mapping for. Emit it as-is so scripts that use
+                // such commands can still be packed back into the cache. Mirrors the reader fallback.
+                n = opcode;
             }
             opcode = n;
             output.writeShort(opcode);

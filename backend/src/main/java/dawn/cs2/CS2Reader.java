@@ -37,7 +37,9 @@ public class CS2Reader {
         InputBuffer buffer = new InputBuffer(data);
 
         boolean hasSwitches = !disableSwitches && unscramble.containsValue(Opcodes.SWITCH); //old OSRS doesnt have switches
-        boolean hasLongs = !disableLongs && unscramble.containsValue(Opcodes.PUSH_LONG); //old revisions don't have longs
+        // OSRS rev 237+ always carries the long local/param counts in the trailer, even when no script
+        // actually uses a long variable, so gate purely on the config flag (not on PUSH_LONG presence).
+        boolean hasLongs = !disableLongs; //old revisions don't have the long trailer section
 
         if (hasSwitches) {
             buffer.setOffset(data.length - 2);
@@ -45,8 +47,16 @@ public class CS2Reader {
         int switchBlocksSize = hasSwitches ? buffer.readUnsignedShort() : 0;
 
         int codeBlockEnd = data.length - switchBlocksSize - (hasLongs ? 16 : 12) - (hasSwitches ? 2 : 0);
+        if (codeBlockEnd < 0)
+            throw new DecompilerException("Bad script trailer (codeBlockEnd " + codeBlockEnd + ") — wrong trailer format?");
         buffer.setOffset(codeBlockEnd);
         int codeSize = buffer.readInt();
+        // Each instruction is at least 3 bytes on disk (2-byte opcode + >=1-byte operand), so a valid
+        // instruction count can never exceed the data length. A wildly larger value means we're reading
+        // the trailer at the wrong offset (e.g. the 12- vs 16-byte footer mismatch) — fail fast instead
+        // of allocating a giant instruction array and scanning garbage (which made cache detection slow).
+        if (codeSize < 0 || codeSize > data.length)
+            throw new DecompilerException("Implausible script code size " + codeSize + " (data " + data.length + " bytes) — wrong trailer format?");
         int intLocalsCount = buffer.readUnsignedShort();
         int stringLocalsCount = buffer.readUnsignedShort();
         int longLocalsCount = 0;
@@ -89,18 +99,29 @@ public class CS2Reader {
             int opcode = buffer.readUnsignedShort();
             Integer n = unscramble.get(opcode);
             if (n == null) {
-//                n = opcode;
-                throw new DecompilerException("Unknown scrambling " + opcode);
+                // OSRS does not scramble clientscript opcodes, so an opcode that's absent from the
+                // unscramble table is simply a newer command we have no explicit mapping for yet
+                // (e.g. commands added after this build's tables). Fall back to identity so the script
+                // still reads instead of throwing; it decompiles as method_<op>(...) if it also lacks
+                // a signature. This keeps the editor forward-compatible with newer revisions.
+                n = opcode;
             }
             opcode = n;
             if (opcode == Opcodes.PUSH_STRING) {
                 script.getInstructions()[(writeOffset * 2) + 1] = new StringInstruction(opcode, buffer.readString());
             } else if (opcode == Opcodes.PUSH_LONG) {
+                // OSRS 239 cache opcode 61 (mapped to PUSH_LONG via osrs.txt) carries an 8-byte long constant.
                 script.getInstructions()[(writeOffset * 2) + 1] = new LongInstruction(opcode, buffer.readLong());
-            } else if (opcode == Opcodes.RETURN || opcode == Opcodes.POP_INT || opcode == Opcodes.POP_STRING) {
+            } else if (opcode == Opcodes.PUSH_NULL_STRING) {
+                // OSRS 239 cache opcode 63 pushes a null string; it carries a 1-byte (ignored) operand, not a
+                // full string. Model it as a string constant push so the stack stays balanced during decompile.
+                buffer.readUnsignedByte();
+                script.getInstructions()[(writeOffset * 2) + 1] = new StringInstruction(Opcodes.PUSH_STRING, null);
+            } else if (opcode == Opcodes.RETURN || opcode == Opcodes.POP_INT || opcode == Opcodes.POP_STRING || opcode == Opcodes.POP_LONG) {
                 //TODO: this might aswell be booleaninstructions, but decompiler kind of expects them to be intinstructions right now
+                // POP_LONG (cache opcode 62) also has a 1-byte operand in OSRS 239.
                 script.getInstructions()[(writeOffset * 2) + 1] = new IntInstruction(opcode, buffer.readUnsignedByte());
-            } else if (opcode >= (hasLongs ? 150 : 100)) { // || opcode == 21 || opcode == 38 || opcode == 39)
+            } else if (opcode >= 100) { // OSRS: every command opcode (>=100) has a 1-byte operand, regardless of longs. || opcode == 21 || opcode == 38 || opcode == 39)
                 script.getInstructions()[(writeOffset * 2) + 1] = new BooleanInstruction(opcode, buffer.readUnsignedByte() == 1);
             } else if (opcode == Opcodes.SWITCH) { // switch
                 Map block = switches[buffer.readInt()];

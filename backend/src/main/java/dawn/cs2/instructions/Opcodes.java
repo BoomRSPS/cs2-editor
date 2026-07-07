@@ -9,6 +9,7 @@ public class Opcodes {
     public static final int PUSH_INT = 0;
     public static final int PUSH_STRING = 3;
     public static final int PUSH_LONG = 54;
+    public static final int PUSH_NULL_STRING = 63; // OSRS 239 cache opcode: pushes a null string, 1-byte operand
     public static final int POP_INT = 38;
     public static final int POP_STRING = 39;
     public static final int POP_LONG = 55;

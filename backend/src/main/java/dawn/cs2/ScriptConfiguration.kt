@@ -18,6 +18,47 @@ data class ScriptConfiguration(val opcodeDatabase: String = "/cs2/opcode/databas
         return "ScriptConfiguration[database=$opcodeDatabase, switches=${!disableSwitches}, longs=${!disableLongs}]"
     }
 
+    companion object {
+        /**
+         * The CS2 script footer isn't self-describing: OSRS rev 237+ added a long-variable section to the
+         * trailer (16-byte footer), while older caches (<=236) use the 12-byte footer. Reading with the
+         * wrong assumption misaligns the whole script (huge codeSize, buffer overruns), so probe a sample
+         * of scripts both ways and pick whichever reads cleanly.
+         *
+         * @return the disableLongs flag to use: true = old 12-byte footer (longs off), false = 237+ footer.
+         */
+        @JvmStatic
+        fun detectDisableLongs(cache: CacheLibrary, unscramble: Map<Int, Int>, disableSwitches: Boolean): Boolean {
+            val ids = cache.index(SCRIPTS_INDEX)?.archiveIds() ?: return false
+            var withLongs = 0    // clean reads treating the footer as 16-byte (longs enabled)
+            var withoutLongs = 0 // clean reads treating the footer as 12-byte (longs disabled)
+            var sampled = 0
+            for (id in ids) {
+                if (sampled >= 80) break
+                val data = try {
+                    cache.data(SCRIPTS_INDEX, id)
+                } catch (e: Exception) {
+                    null
+                } ?: continue
+                if (data.size < 16) continue
+                sampled++
+                if (readsClean(data, id, unscramble, disableSwitches, false)) withLongs++
+                if (readsClean(data, id, unscramble, disableSwitches, true)) withoutLongs++
+            }
+            // In practice one mode reads virtually all scripts and the other throws on most; a clear
+            // winner. Keep longs enabled on an exact tie (matches the modern-cache default).
+            return withoutLongs > withLongs
+        }
+
+        private fun readsClean(data: ByteArray, id: Int, unscramble: Map<Int, Int>, disableSwitches: Boolean, disableLongs: Boolean): Boolean {
+            return try {
+                CS2Reader.readCS2ScriptNewFormat(data, id, unscramble, disableSwitches, disableLongs) != null
+            } catch (t: Throwable) {
+                false
+            }
+        }
+    }
+
     fun generateScriptsDatabase(cacheLibrary: CacheLibrary, loop: Int = 6): FunctionDatabase {
         val opcodesDatabase = FunctionDatabase(javaClass.getResourceAsStream(opcodeDatabase), false, scrambled)
         val scriptsDatabase = FunctionDatabase()

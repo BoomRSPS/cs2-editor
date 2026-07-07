@@ -66,6 +66,9 @@ class MainController : Initializable {
     private lateinit var exportSignatures: MenuItem
 
     @FXML
+    private lateinit var copyToCacheMenuItem: MenuItem
+
+    @FXML
     private lateinit var showAssemblyMenuItem: CheckMenuItem
 
     @FXML
@@ -171,6 +174,9 @@ class MainController : Initializable {
         }
         importScriptMenuItem.setOnAction {
             importScript()
+        }
+        copyToCacheMenuItem.setOnAction {
+            copyScriptsToCache()
         }
         aboutMenuItem.setOnAction {
             AboutWindow()
@@ -333,6 +339,17 @@ class MainController : Initializable {
                         clearCache()
                     }
                 }
+                // The CS2 footer format changed in OSRS rev 237+ (a long-variable section was added).
+                // Detect which format this cache uses so both older (<=236) and newer caches open.
+                val disableLongs = ScriptConfiguration.detectDisableLongs(
+                    cacheLibrary,
+                    scriptConfiguration.unscrambled,
+                    scriptConfiguration.disableSwitches
+                )
+                if (disableLongs != scriptConfiguration.disableLongs) {
+                    scriptConfiguration = scriptConfiguration.copy(disableLongs = disableLongs)
+                }
+                println("CS2 trailer: long-variable section ${if (disableLongs) "absent (<=236 cache)" else "present (237+ cache)"}")
                 loadParams()
                 loadScripts()
                 createScriptConfigurations()
@@ -393,6 +410,100 @@ class MainController : Initializable {
             e.printStackTrace()
             Notification.error("Failed to load recent paths from recent_paths.dat: ${e.message}")
         }
+    }
+
+    /**
+     * Copy scripts from the currently-open (source) cache into another cache the user selects,
+     * transcoding the script footer between the old (<=236, 12-byte) and new (237+, 16-byte) formats
+     * as needed so scripts can be ported between revisions. See [CachePorter].
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun copyScriptsToCache() {
+        if (!this::cacheLibrary.isInitialized) {
+            Notification.error("Open a source cache first.")
+            return
+        }
+        val input = TextInputDialog(currentScript?.scriptID?.toString() ?: "")
+        input.title = "Copy scripts to another cache"
+        input.headerText = "Which scripts to copy from the current cache?"
+        input.contentText = "IDs / ranges / all (e.g. \"71\", \"1,4,71\", \"1000-1099\", \"all\"):"
+        val idsText = input.showAndWait().orElse(null)?.trim() ?: return
+        val ids = parseScriptIds(idsText)
+        if (ids == null) {
+            Notification.error("Couldn't parse script IDs: \"$idsText\"")
+            return
+        }
+        if (ids.isEmpty()) {
+            Notification.error("No script IDs to copy.")
+            return
+        }
+        val chooser = DirectoryChooser()
+        chooser.title = "Choose the destination cache directory"
+        val dir = chooser.showDialog(mainWindow()) ?: return
+        scriptList.isDisable = true
+        status("Copying ${ids.size} script(s) to ${dir.name}...")
+        GlobalScope.launch {
+            try {
+                val dst = CacheLibrary(dir.absolutePath, false, null)
+                if (!dst.exists(SCRIPTS_INDEX)) {
+                    try { dst.close() } catch (ignored: Exception) {}
+                    Platform.runLater {
+                        Notification.error("Destination cache has no script index ($SCRIPTS_INDEX).")
+                        scriptList.isDisable = false
+                        status("ready")
+                    }
+                    return@launch
+                }
+                val result = CachePorter.port(cacheLibrary, dst, ids)
+                try { dst.close() } catch (ignored: Exception) {}
+                Platform.runLater {
+                    scriptList.isDisable = false
+                    status("ready")
+                    if (result.ported.isEmpty()) {
+                        Notification.error("Copied 0 scripts (${result.failed.size} failed).")
+                    } else {
+                        val extra = if (result.failed.isEmpty()) "" else " (${result.failed.size} failed)"
+                        Notification.info("Copied ${result.ported.size} script(s) to ${dir.name}$extra.")
+                    }
+                    if (result.failed.isNotEmpty()) {
+                        printConsoleMessage("Copy to ${dir.absolutePath}: ${result.failed.size} failed -> ${result.failed}")
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Platform.runLater {
+                    scriptList.isDisable = false
+                    status("ready")
+                    Notification.error("Copy failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /** Parse "all", comma-separated ids and dash ranges (e.g. "1,4,1000-1099") into script ids; null if invalid. */
+    private fun parseScriptIds(text: String): IntArray? {
+        if (text.equals("all", ignoreCase = true)) {
+            return cacheLibrary.index(SCRIPTS_INDEX)?.archiveIds()
+        }
+        val ids = sortedSetOf<Int>()
+        try {
+            for (part in text.split(",")) {
+                val p = part.trim()
+                if (p.isEmpty()) continue
+                if (p.contains("-")) {
+                    val bounds = p.split("-", limit = 2)
+                    val lo = bounds[0].trim().toInt()
+                    val hi = bounds[1].trim().toInt()
+                    if (lo > hi) return null
+                    for (i in lo..hi) ids.add(i)
+                } else {
+                    ids.add(p.toInt())
+                }
+            }
+        } catch (e: NumberFormatException) {
+            return null
+        }
+        return ids.toIntArray()
     }
 
     private fun loadParams() {
@@ -495,6 +606,7 @@ class MainController : Initializable {
             saveScriptAs.isDisable = false
             buildMenuItem.isDisable = false
             exportSignatures.isDisable = false
+            copyToCacheMenuItem.isDisable = false
         }
     }
 

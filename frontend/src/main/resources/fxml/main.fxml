@@ -29,6 +29,8 @@
                         <MenuItem fx:id="saveScriptAs" disable="true" mnemonicParsing="false" text="Save As"/>
                         <MenuItem fx:id="buildMenuItem" disable="true" mnemonicParsing="false" text="Pack Script (Ctrl + D)"/>
                         <MenuItem fx:id="exportSignatures" disable="true" mnemonicParsing="false" text="Export script signatures"/>
+                        <SeparatorMenuItem mnemonicParsing="false"/>
+                        <MenuItem fx:id="copyToCacheMenuItem" disable="true" mnemonicParsing="false" text="Copy scripts to cache…"/>
                     </items>
                 </Menu>
                 <Menu mnemonicParsing="false" text="View">
