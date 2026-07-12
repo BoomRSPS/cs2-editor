@@ -177,8 +177,12 @@ public class CachePorter {
     // stack matches what the 239 client pops. The extra arg(s) are the new trailing parameter(s) (the
     // 239 native scripts pass 0 there), verified against the 239 client's ScriptRunner.
     //
-    // Key: editor master opcode. Value: number of `push_int 0` to insert before each occurrence.
-    //   150 = createChild (cache opcode 100): 3 args in <=~236, 4 args in 239 (added a trailing flag).
+    // Key: editor MASTER opcode as returned by CS2Reader (after unscrambling). Value: number of
+    // `push_int 0` to insert before each occurrence.
+    //   150 = cc_create/createChild: 3 args in <=~236, 4 args in 239 (added a trailing flag).
+    // osrs.txt maps master 150 <-> cache 100, so createChild (written as cache opcode 100, hence the
+    // client's "command 100" crash) reads back here as master 150. Keying on cache 100 never matches -
+    // the reader has already unscrambled it to 150.
     // ---------------------------------------------------------------------------------------------
     public static final Map<Integer, Integer> REV239_INT_ARG_INSERTS = Map.of(150, 1);
 
@@ -201,6 +205,9 @@ public class CachePorter {
             }
             out.add(ins);
         }
+        // No arg-count-changed opcode in this script: leave the bytes byte-for-byte untouched rather
+        // than round-tripping them through reserialize (which would risk altering scripts needlessly).
+        if (inserted == 0) return data;
         return reserialize(out, script, scramble, dstLongs, !disableSwitches);
     }
 
